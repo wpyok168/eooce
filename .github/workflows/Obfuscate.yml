@@ -41,7 +41,7 @@ jobs:
         id: download_worker
         run: |
           echo "📥 下载 Worker 主文件..."
-          WORKER_URL="https://raw.githubusercontent.com/cmliu/edgetunnel/refs/heads/beta2.0/_worker.js"
+          WORKER_URL="https://raw.githubusercontent.com/eooce/Cloudflare-proxy/refs/heads/main/_worker.js"
           
           for attempt in {1..3}; do
             echo "⬇️ 下载尝试 $attempt/3..."
