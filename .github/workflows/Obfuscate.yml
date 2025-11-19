@@ -1,4 +1,4 @@
-name: 🔄 Auto Update Multiple Files
+name: 🔄 自动更新多个文件
 
 on:
   push:
@@ -273,7 +273,7 @@ jobs:
           fi
           
           # 生成提交信息
-          COMMIT_MSG="🔄 Auto Update Multiple Files"
+          COMMIT_MSG="🔄 自动更新多个文件"
           COMMIT_MSG+=$'\n'
           COMMIT_MSG+=$'\n'
           COMMIT_MSG+="• 更新时间: $(date '+%Y-%m-%d %H:%M:%S')"
