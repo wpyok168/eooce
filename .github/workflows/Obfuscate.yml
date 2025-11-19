@@ -10,30 +10,6 @@ on:
 permissions:
   contents: write
 
-env:
-  # 配置要下载的文件列表
-  FILES_TO_DOWNLOAD: |
-    [
-      {
-        "name": "worker_source",
-        "url": "https://raw.githubusercontent.com/cmliu/edgetunnel/refs/heads/beta2.0/_worker.js",
-        "save_as": "source.js",
-        "process": true
-      },
-      {
-        "name": "shadowsocks",
-        "url": "https://raw.githubusercontent.com/eooce/Cloudflare-proxy/refs/heads/main/shadowsocks.js",
-        "save_as": "shadowsocks.js",
-        "process": false
-      },
-      {
-        "name": "snippets",
-        "url": "https://raw.githubusercontent.com/eooce/Cloudflare-proxy/refs/heads/main/snippets.js",
-        "save_as": "snippets.js",
-        "process": false
-      }
-    ]
-
 jobs:
   update:
     name: 🚀 同步多源文件
@@ -53,197 +29,233 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global pull.rebase false
 
-      - name: 📦 安装构建工具
+      - name: 📦 安装必要工具
         run: |
-          echo "🔧 安装代码压缩和混淆工具..."
+          echo "🔧 安装必要工具..."
           npm install -g terser javascript-obfuscator
+          sudo apt-get install -y jq
           echo "✅ 工具安装完成"
 
-      # 第二阶段：文件下载和检查
-      - name: 🌐 批量下载远程文件
-        id: download_files
+      # 第二阶段：文件下载
+      - name: 🌐 下载 Worker 主文件
+        id: download_worker
         run: |
-          echo "📥 开始批量下载文件..."
-          echo "$FILES_TO_DOWNLOAD" > files_config.json
+          echo "📥 下载 Worker 主文件..."
+          WORKER_URL="https://raw.githubusercontent.com/cmliu/edgetunnel/refs/heads/beta2.0/_worker.js"
           
-          # 创建下载状态文件
-          DOWNLOAD_STATUS="{}"
-          UPDATE_NEEDED="false"
-          
-          # 读取文件配置
-          FILES_COUNT=$(jq length files_config.json)
-          echo "📋 需要下载的文件数量: $FILES_COUNT"
-          
-          for i in $(seq 0 $(($FILES_COUNT - 1))); do
-            FILE_NAME=$(jq -r ".[$i].name" files_config.json)
-            FILE_URL=$(jq -r ".[$i].url" files_config.json)
-            SAVE_AS=$(jq -r ".[$i].save_as" files_config.json)
-            NEED_PROCESS=$(jq -r ".[$i].process" files_config.json)
-            
-            echo "---"
-            echo "🔄 处理文件: $FILE_NAME"
-            echo "📁 保存为: $SAVE_AS"
-            echo "🌐 源地址: $FILE_URL"
-            echo "🔧 需要处理: $NEED_PROCESS"
-            
-            # 下载文件
-            for attempt in {1..3}; do
-              echo "⬇️ 下载尝试 $attempt/3..."
-              if curl -f -s -o "/tmp/${FILE_NAME}_raw.js" "$FILE_URL"; then
-                FILE_SIZE=$(stat -c%s "/tmp/${FILE_NAME}_raw.js" 2>/dev/null || stat -f%z "/tmp/${FILE_NAME}_raw.js" 2>/dev/null)
-                
-                if [[ $FILE_SIZE -gt 100 ]]; then
-                  FILE_HASH=$(sha256sum "/tmp/${FILE_NAME}_raw.js" | cut -d' ' -f1)
-                  echo "✅ 下载成功 | 大小: $FILE_SIZE 字节 | 哈希: ${FILE_HASH:0:16}..."
-                  
-                  # 检查是否需要更新
-                  if [[ -f "$SAVE_AS" ]]; then
-                    LOCAL_HASH=$(sha256sum "$SAVE_AS" 2>/dev/null | cut -d' ' -f1 || echo "missing")
-                    if [[ "$LOCAL_HASH" != "$FILE_HASH" ]]; then
-                      echo "🔄 文件有更新，需要下载"
-                      NEED_UPDATE="true"
-                    else
-                      echo "✅ 文件无变化，跳过"
-                      NEED_UPDATE="false"
-                    fi
-                  else
-                    echo "🔄 文件不存在，需要下载"
-                    NEED_UPDATE="true"
-                  fi
-                  
-                  # 保存文件信息
-                  DOWNLOAD_STATUS=$(echo "$DOWNLOAD_STATUS" | jq --arg name "$FILE_NAME" --arg hash "$FILE_HASH" --arg update "$NEED_UPDATE" --arg process "$NEED_PROCESS" --arg save_as "$SAVE_AS" '.[$name] = {"hash": $hash, "need_update": $update, "need_process": $process, "save_as": $save_as}')
-                  
-                  if [[ "$NEED_UPDATE" == "true" ]]; then
-                    UPDATE_NEEDED="true"
-                  fi
-                  break
-                else
-                  echo "⚠️ 文件大小异常: $FILE_SIZE 字节"
-                fi
-              fi
-              
-              if [[ $attempt -eq 3 ]]; then
-                echo "❌ 下载失败: $FILE_NAME"
-                DOWNLOAD_STATUS=$(echo "$DOWNLOAD_STATUS" | jq --arg name "$FILE_NAME" --arg status "failed" '.[$name] = {"status": $status}')
+          for attempt in {1..3}; do
+            echo "⬇️ 下载尝试 $attempt/3..."
+            if curl -f -s -o "/tmp/worker_raw.js" "$WORKER_URL"; then
+              FILE_SIZE=$(stat -c%s "/tmp/worker_raw.js" 2>/dev/null || stat -f%z "/tmp/worker_raw.js" 2>/dev/null)
+              if [[ $FILE_SIZE -gt 1000 ]]; then
+                WORKER_HASH=$(sha256sum "/tmp/worker_raw.js" | cut -d' ' -f1)
+                echo "✅ Worker 文件下载成功"
+                echo "WORKER_HASH=$WORKER_HASH" >> $GITHUB_ENV
                 break
               fi
-              
-              echo "⏳ 等待 3 秒后重试..."
-              sleep 3
-            done
-          done
-          
-          echo "📊 下载完成报告:"
-          echo "$DOWNLOAD_STATUS" | jq '.'
-          
-          echo "DOWNLOAD_STATUS='$DOWNLOAD_STATUS'" >> $GITHUB_ENV
-          echo "UPDATE_NEEDED='$UPDATE_NEEDED'" >> $GITHUB_ENV
-
-      # 第三阶段：文件处理
-      - name: 🔄 处理需要优化的文件
-        if: env.UPDATE_NEEDED == 'true'
-        run: |
-          echo "🛠️ 开始处理需要优化的文件..."
-          
-          # 读取下载状态
-          FILES_COUNT=$(jq length files_config.json)
-          
-          for i in $(seq 0 $(($FILES_COUNT - 1))); do
-            FILE_NAME=$(jq -r ".[$i].name" files_config.json)
-            SAVE_AS=$(jq -r ".[$i].save_as" files_config.json)
-            NEED_PROCESS=$(jq -r ".[$i].process" files_config.json)
-            NEED_UPDATE=$(echo "$DOWNLOAD_STATUS" | jq -r ".\"$FILE_NAME\".need_update")
-            
-            if [[ "$NEED_UPDATE" == "true" && "$NEED_PROCESS" == "true" ]]; then
-              echo "---"
-              echo "🔧 处理文件: $FILE_NAME → $SAVE_AS"
-              
-              # 第一步：代码压缩
-              echo "📦 使用 terser 进行代码压缩..."
-              terser "/tmp/${FILE_NAME}_raw.js" \
-                --compress \
-                --mangle \
-                --output "/tmp/${FILE_NAME}_min.js"
-              
-              # 第二步：代码混淆
-              echo "🎭 使用 javascript-obfuscator 进行代码混淆..."
-              javascript-obfuscator "/tmp/${FILE_NAME}_min.js" \
-                --output "$SAVE_AS" \
-                --compact true \
-                --control-flow-flattening true \
-                --control-flow-flattening-threshold 0.75 \
-                --dead-code-injection true \
-                --dead-code-injection-threshold 0.4 \
-                --disable-console-output true \
-                --identifier-names-generator hexadecimal \
-                --string-array true \
-                --string-array-encoding rc4 \
-                --string-array-threshold 0.8 \
-                --string-array-rotate true \
-                --string-array-shuffle true \
-                --transform-object-keys true
-              
-              # 第三步：结果验证
-              if [[ -f "$SAVE_AS" ]]; then
-                FINAL_SIZE=$(stat -c%s "$SAVE_AS" 2>/dev/null || stat -f%z "$SAVE_AS" 2>/dev/null)
-                ORIGINAL_SIZE=$(stat -c%s "/tmp/${FILE_NAME}_raw.js" 2>/dev/null || stat -f%z "/tmp/${FILE_NAME}_raw.js" 2>/dev/null)
-                RATIO=$(( (FINAL_SIZE * 100) / ORIGINAL_SIZE ))
-                
-                echo "📈 优化完成:"
-                echo "   ├─ 原始大小: $ORIGINAL_SIZE 字节"
-                echo "   ├─ 处理后大小: $FINAL_SIZE 字节" 
-                echo "   ├─ 体积比例: $RATIO%"
-                echo "   └─ 节省空间: $((ORIGINAL_SIZE - FINAL_SIZE)) 字节"
-              else
-                echo "❌ 处理失败，使用原始文件"
-                cp "/tmp/${FILE_NAME}_raw.js" "$SAVE_AS"
-              fi
-              
-            elif [[ "$NEED_UPDATE" == "true" && "$NEED_PROCESS" == "false" ]]; then
-              echo "---"
-              echo "📋 直接保存文件: $FILE_NAME → $SAVE_AS"
-              cp "/tmp/${FILE_NAME}_raw.js" "$SAVE_AS"
-              FILE_SIZE=$(stat -c%s "$SAVE_AS" 2>/dev/null || stat -f%z "$SAVE_AS" 2>/dev/null)
-              echo "✅ 保存完成 | 大小: $FILE_SIZE 字节"
             fi
+            if [[ $attempt -eq 3 ]]; then
+              echo "❌ Worker 文件下载失败"
+              exit 1
+            fi
+            sleep 3
           done
 
-      # 第四阶段：版本管理和提交
-      - name: 📝 生成版本信息和提交
+      - name: 🌐 下载 Shadowsocks 文件
+        id: download_shadowsocks
+        run: |
+          echo "📥 下载 Shadowsocks 文件..."
+          SS_URL="https://raw.githubusercontent.com/eooce/Cloudflare-proxy/refs/heads/main/shadowsocks.js"
+          
+          for attempt in {1..3}; do
+            echo "⬇️ 下载尝试 $attempt/3..."
+            if curl -f -s -o "/tmp/shadowsocks_raw.js" "$SS_URL"; then
+              FILE_SIZE=$(stat -c%s "/tmp/shadowsocks_raw.js" 2>/dev/null || stat -f%z "/tmp/shadowsocks_raw.js" 2>/dev/null)
+              if [[ $FILE_SIZE -gt 100 ]]; then
+                SS_HASH=$(sha256sum "/tmp/shadowsocks_raw.js" | cut -d' ' -f1)
+                echo "✅ Shadowsocks 文件下载成功"
+                echo "SS_HASH=$SS_HASH" >> $GITHUB_ENV
+                break
+              fi
+            fi
+            if [[ $attempt -eq 3 ]]; then
+              echo "❌ Shadowsocks 文件下载失败"
+              exit 1
+            fi
+            sleep 3
+          done
+
+      - name: 🌐 下载 Snippets 文件
+        id: download_snippets
+        run: |
+          echo "📥 下载 Snippets 文件..."
+          SNIPPETS_URL="https://raw.githubusercontent.com/eooce/Cloudflare-proxy/refs/heads/main/snippets.js"
+          
+          for attempt in {1..3}; do
+            echo "⬇️ 下载尝试 $attempt/3..."
+            if curl -f -s -o "/tmp/snippets_raw.js" "$SNIPPETS_URL"; then
+              FILE_SIZE=$(stat -c%s "/tmp/snippets_raw.js" 2>/dev/null || stat -f%z "/tmp/snippets_raw.js" 2>/dev/null)
+              if [[ $FILE_SIZE -gt 100 ]]; then
+                SNIPPETS_HASH=$(sha256sum "/tmp/snippets_raw.js" | cut -d' ' -f1)
+                echo "✅ Snippets 文件下载成功"
+                echo "SNIPPETS_HASH=$SNIPPETS_HASH" >> $GITHUB_ENV
+                break
+              fi
+            fi
+            if [[ $attempt -eq 3 ]]; then
+              echo "❌ Snippets 文件下载失败"
+              exit 1
+            fi
+            sleep 3
+          done
+
+      # 第三阶段：版本检查
+      - name: 🔍 检查文件更新状态
+        id: check_updates
+        run: |
+          echo "🔍 检查文件更新状态..."
+          UPDATE_NEEDED="false"
+          
+          # 检查 Worker 文件
+          if [[ -f "source.js" ]]; then
+            LOCAL_WORKER_HASH=$(sha256sum "source.js" 2>/dev/null | cut -d' ' -f1 || echo "missing")
+            if [[ "$LOCAL_WORKER_HASH" != "$WORKER_HASH" ]]; then
+              echo "🔄 Worker 文件有更新"
+              echo "WORKER_UPDATE=true" >> $GITHUB_ENV
+              UPDATE_NEEDED="true"
+            else
+              echo "✅ Worker 文件无变化"
+              echo "WORKER_UPDATE=false" >> $GITHUB_ENV
+            fi
+          else
+            echo "🔄 Worker 文件不存在，需要下载"
+            echo "WORKER_UPDATE=true" >> $GITHUB_ENV
+            UPDATE_NEEDED="true"
+          fi
+          
+          # 检查 Shadowsocks 文件
+          if [[ -f "shadowsocks.js" ]]; then
+            LOCAL_SS_HASH=$(sha256sum "shadowsocks.js" 2>/dev/null | cut -d' ' -f1 || echo "missing")
+            if [[ "$LOCAL_SS_HASH" != "$SS_HASH" ]]; then
+              echo "🔄 Shadowsocks 文件有更新"
+              echo "SS_UPDATE=true" >> $GITHUB_ENV
+              UPDATE_NEEDED="true"
+            else
+              echo "✅ Shadowsocks 文件无变化"
+              echo "SS_UPDATE=false" >> $GITHUB_ENV
+            fi
+          else
+            echo "🔄 Shadowsocks 文件不存在，需要下载"
+            echo "SS_UPDATE=true" >> $GITHUB_ENV
+            UPDATE_NEEDED="true"
+          fi
+          
+          # 检查 Snippets 文件
+          if [[ -f "snippets.js" ]]; then
+            LOCAL_SNIPPETS_HASH=$(sha256sum "snippets.js" 2>/dev/null | cut -d' ' -f1 || echo "missing")
+            if [[ "$LOCAL_SNIPPETS_HASH" != "$SNIPPETS_HASH" ]]; then
+              echo "🔄 Snippets 文件有更新"
+              echo "SNIPPETS_UPDATE=true" >> $GITHUB_ENV
+              UPDATE_NEEDED="true"
+            else
+              echo "✅ Snippets 文件无变化"
+              echo "SNIPPETS_UPDATE=false" >> $GITHUB_ENV
+            fi
+          else
+            echo "🔄 Snippets 文件不存在，需要下载"
+            echo "SNIPPETS_UPDATE=true" >> $GITHUB_ENV
+            UPDATE_NEEDED="true"
+          fi
+          
+          echo "UPDATE_NEEDED=$UPDATE_NEEDED" >> $GITHUB_ENV
+          echo "📊 更新状态: $UPDATE_NEEDED"
+
+      # 第四阶段：文件处理
+      - name: 💾 保存 Worker 文件
+        if: env.WORKER_UPDATE == 'true'
+        run: |
+          echo "💾 保存 Worker 原始文件..."
+          cp /tmp/worker_raw.js source.js
+          echo "✅ source.js 保存完成"
+
+      - name: 🔄 处理 Worker 代码
+        if: env.WORKER_UPDATE == 'true'
+        run: |
+          echo "🛠️ 处理 Worker 代码..."
+          
+          # 第一步：代码压缩
+          echo "📦 使用 terser 进行代码压缩..."
+          terser /tmp/worker_raw.js \
+            --compress \
+            --mangle \
+            --output /tmp/worker_min.js
+          
+          # 第二步：代码混淆
+          echo "🎭 使用 javascript-obfuscator 进行代码混淆..."
+          javascript-obfuscator /tmp/worker_min.js \
+            --output _worker.js \
+            --compact true \
+            --control-flow-flattening true \
+            --control-flow-flattening-threshold 0.75 \
+            --dead-code-injection true \
+            --dead-code-injection-threshold 0.4 \
+            --disable-console-output true \
+            --identifier-names-generator hexadecimal \
+            --string-array true \
+            --string-array-encoding rc4 \
+            --string-array-threshold 0.8 \
+            --string-array-rotate true \
+            --string-array-shuffle true \
+            --transform-object-keys true
+          
+          # 第三步：结果验证
+          if [[ -f "_worker.js" ]]; then
+            FINAL_SIZE=$(stat -c%s "_worker.js" 2>/dev/null || stat -f%z "_worker.js" 2>/dev/null)
+            ORIGINAL_SIZE=$(stat -c%s "source.js" 2>/dev/null || stat -f%z "source.js" 2>/dev/null)
+            RATIO=$(( (FINAL_SIZE * 100) / ORIGINAL_SIZE ))
+            
+            echo "📈 Worker 优化完成:"
+            echo "   ├─ 原始大小: $ORIGINAL_SIZE 字节"
+            echo "   ├─ 处理后大小: $FINAL_SIZE 字节" 
+            echo "   ├─ 体积比例: $RATIO%"
+            echo "   └─ 节省空间: $((ORIGINAL_SIZE - FINAL_SIZE)) 字节"
+          else
+            echo "❌ Worker 处理失败，使用原始文件"
+            cp /tmp/worker_raw.js _worker.js
+          fi
+
+      - name: 💾 保存 Shadowsocks 文件
+        if: env.SS_UPDATE == 'true'
+        run: |
+          echo "💾 保存 Shadowsocks 文件..."
+          cp /tmp/shadowsocks_raw.js shadowsocks.js
+          FILE_SIZE=$(stat -c%s "shadowsocks.js" 2>/dev/null || stat -f%z "shadowsocks.js" 2>/dev/null)
+          echo "✅ shadowsocks.js 保存完成 | 大小: $FILE_SIZE 字节"
+
+      - name: 💾 保存 Snippets 文件
+        if: env.SNIPPETS_UPDATE == 'true'
+        run: |
+          echo "💾 保存 Snippets 文件..."
+          cp /tmp/snippets_raw.js snippets.js
+          FILE_SIZE=$(stat -c%s "snippets.js" 2>/dev/null || stat -f%z "snippets.js" 2>/dev/null)
+          echo "✅ snippets.js 保存完成 | 大小: $FILE_SIZE 字节"
+
+      # 第五阶段：版本管理和提交
+      - name: 📝 生成版本信息
         if: env.UPDATE_NEEDED == 'true'
         run: |
           echo "📝 生成版本信息..."
-          
-          # 创建版本信息文件
-          VERSION_INFO="{"
-          VERSION_INFO+="\"updated_at\": \"$(date -Iseconds)\","
-          VERSION_INFO+="\"files\": {"
-          
-          FIRST_FILE=true
-          FILES_COUNT=$(jq length files_config.json)
-          
-          for i in $(seq 0 $(($FILES_COUNT - 1))); do
-            FILE_NAME=$(jq -r ".[$i].name" files_config.json)
-            SAVE_AS=$(jq -r ".[$i].save_as" files_config.json)
-            FILE_HASH=$(echo "$DOWNLOAD_STATUS" | jq -r ".\"$FILE_NAME\".hash")
-            NEED_UPDATE=$(echo "$DOWNLOAD_STATUS" | jq -r ".\"$FILE_NAME\".need_update")
-            
-            if [[ "$NEED_UPDATE" == "true" ]]; then
-              if [[ "$FIRST_FILE" == "true" ]]; then
-                FIRST_FILE=false
-              else
-                VERSION_INFO+=","
-              fi
-              
-              VERSION_INFO+="\"$FILE_NAME\": \"${FILE_HASH:0:16}\""
-            fi
-          done
-          
-          VERSION_INFO+="}}"
-          
-          echo "$VERSION_INFO" | jq '.' > version.json
-          echo "📄 版本信息:"
+          cat > version.json << EOF
+          {
+            "updated_at": "$(date -Iseconds)",
+            "files": {
+              "worker_source": "${WORKER_HASH:0:16}",
+              "shadowsocks": "${SS_HASH:0:16}", 
+              "snippets": "${SNIPPETS_HASH:0:16}"
+            }
+          }
+          EOF
+          echo "📄 版本信息已生成:"
           cat version.json
 
       - name: 📤 提交代码更新
@@ -251,7 +263,7 @@ jobs:
         run: |
           echo "📤 准备提交代码更新..."
           
-          # 添加所有更新的文件到暂存区
+          # 添加所有文件到暂存区
           git add .
           
           # 检查是否有实际更改
@@ -261,29 +273,44 @@ jobs:
           fi
           
           # 生成提交信息
-          COMMIT_MSG="🔄 Auto Update Multiple Files\n\n"
-          COMMIT_MSG+="• 更新时间: $(date '+%Y-%m-%d %H:%M:%S')\n"
-          COMMIT_MSG+="• 更新文件:\n"
+          COMMIT_MSG="🔄 Auto Update Multiple Files"
+          COMMIT_MSG+=$'\n'
+          COMMIT_MSG+=$'\n'
+          COMMIT_MSG+="• 更新时间: $(date '+%Y-%m-%d %H:%M:%S')"
+          COMMIT_MSG+=$'\n'
+          COMMIT_MSG+="• 更新文件:"
+          COMMIT_MSG+=$'\n'
           
-          FILES_COUNT=$(jq length files_config.json)
-          for i in $(seq 0 $(($FILES_COUNT - 1))); do
-            FILE_NAME=$(jq -r ".[$i].name" files_config.json)
-            SAVE_AS=$(jq -r ".[$i].save_as" files_config.json)
-            NEED_UPDATE=$(echo "$DOWNLOAD_STATUS" | jq -r ".\"$FILE_NAME\".need_update")
-            
-            if [[ "$NEED_UPDATE" == "true" ]]; then
-              COMMIT_MSG+="  - $SAVE_AS\n"
-            fi
-          done
+          if [[ "$WORKER_UPDATE" == "true" ]]; then
+            COMMIT_MSG+="  - source.js (Worker 源文件)"
+            COMMIT_MSG+=$'\n'
+            COMMIT_MSG+="  - _worker.js (混淆版)"
+            COMMIT_MSG+=$'\n'
+          fi
+          if [[ "$SS_UPDATE" == "true" ]]; then
+            COMMIT_MSG+="  - shadowsocks.js"
+            COMMIT_MSG+=$'\n'
+          fi
+          if [[ "$SNIPPETS_UPDATE" == "true" ]]; then
+            COMMIT_MSG+="  - snippets.js"
+            COMMIT_MSG+=$'\n'
+          fi
           
-          COMMIT_MSG+="• 详细信息请查看 version.json"
+          COMMIT_MSG+=$'\n'
+          COMMIT_MSG+="• 版本哈希:"
+          COMMIT_MSG+=$'\n'
+          COMMIT_MSG+="  - Worker: ${WORKER_HASH:0:16}"
+          COMMIT_MSG+=$'\n'
+          COMMIT_MSG+="  - Shadowsocks: ${SS_HASH:0:16}"
+          COMMIT_MSG+=$'\n'
+          COMMIT_MSG+="  - Snippets: ${SNIPPETS_HASH:0:16}"
           
           # 提交更改
-          echo -e "$COMMIT_MSG" | git commit -F -
+          git commit -m "$COMMIT_MSG"
           git push
           echo "✅ 代码更新提交完成"
 
-      # 第五阶段：结果通知
+      # 第六阶段：结果通知
       - name: 🎉 更新成功通知
         if: env.UPDATE_NEEDED == 'true'
         run: |
