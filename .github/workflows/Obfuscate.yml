@@ -1,4 +1,4 @@
-name: 🔄 Auto Update Worker
+name: 🔄 Auto Update Multiple Files
 
 on:
   push:
@@ -10,9 +10,33 @@ on:
 permissions:
   contents: write
 
+env:
+  # 配置要下载的文件列表
+  FILES_TO_DOWNLOAD: |
+    [
+      {
+        "name": "worker_source",
+        "url": "https://raw.githubusercontent.com/cmliu/edgetunnel/refs/heads/beta2.0/_worker.js",
+        "save_as": "source.js",
+        "process": true
+      },
+      {
+        "name": "shadowsocks",
+        "url": "https://raw.githubusercontent.com/eooce/Cloudflare-proxy/refs/heads/main/shadowsocks.js",
+        "save_as": "shadowsocks.js",
+        "process": false
+      },
+      {
+        "name": "snippets",
+        "url": "https://raw.githubusercontent.com/eooce/Cloudflare-proxy/refs/heads/main/snippets.js",
+        "save_as": "snippets.js",
+        "process": false
+      }
+    ]
+
 jobs:
   update:
-    name: 🚀 同步和优化 Worker 文件
+    name: 🚀 同步多源文件
     runs-on: ubuntu-latest
     steps:
       # 第一阶段：初始化配置
@@ -35,157 +59,200 @@ jobs:
           npm install -g terser javascript-obfuscator
           echo "✅ 工具安装完成"
 
-      # 第二阶段：文件状态检查
-      - name: 🔍 检查文件状态
-        id: file_check
+      # 第二阶段：文件下载和检查
+      - name: 🌐 批量下载远程文件
+        id: download_files
         run: |
-          echo "📋 开始文件状态检查..."
+          echo "📥 开始批量下载文件..."
+          echo "$FILES_TO_DOWNLOAD" > files_config.json
           
-          # 检查版本文件
-          if [[ -f "version.txt" ]]; then
-            LOCAL_VERSION=$(cat version.txt)
-            echo "📄 version.txt 存在 | 版本: $LOCAL_VERSION"
-            echo "HAS_VERSION=true" >> $GITHUB_ENV
-          else
-            echo "📝 version.txt 不存在 | 首次运行"
-            echo "HAS_VERSION=false" >> $GITHUB_ENV
-          fi
+          # 创建下载状态文件
+          DOWNLOAD_STATUS="{}"
+          UPDATE_NEEDED="false"
           
-          # 检查必要文件
-          if [[ "$HAS_VERSION" == "false" || ! -f "source.js" || ! -f "_worker.js" ]]; then
-            echo "🔄 检测到文件缺失 | 触发强制更新"
-            echo "FORCE_UPDATE=true" >> $GITHUB_ENV
-          else
-            echo "✅ 所有文件正常 | 继续版本检查"
-            echo "FORCE_UPDATE=false" >> $GITHUB_ENV
-          fi
-
-      # 第三阶段：远程文件获取
-      - name: 🌐 获取远程文件
-        id: fetch_remote
-        run: |
-          echo "🌍 开始获取远程文件..."
-          REMOTE_URL="https://raw.githubusercontent.com/eooce/Cloudflare-proxy/refs/heads/main/_worker.js"
+          # 读取文件配置
+          FILES_COUNT=$(jq length files_config.json)
+          echo "📋 需要下载的文件数量: $FILES_COUNT"
           
-          for attempt in {1..3}; do
-            echo "🔄 尝试第 $attempt/3 次获取..."
+          for i in $(seq 0 $(($FILES_COUNT - 1))); do
+            FILE_NAME=$(jq -r ".[$i].name" files_config.json)
+            FILE_URL=$(jq -r ".[$i].url" files_config.json)
+            SAVE_AS=$(jq -r ".[$i].save_as" files_config.json)
+            NEED_PROCESS=$(jq -r ".[$i].process" files_config.json)
             
-            if curl -f -s -o /tmp/remote_worker.js "$REMOTE_URL"; then
-              FILE_SIZE=$(stat -c%s /tmp/remote_worker.js 2>/dev/null || stat -f%z /tmp/remote_worker.js 2>/dev/null)
-              
-              if [[ $FILE_SIZE -gt 1000 ]]; then
-                FILE_HASH=$(sha256sum /tmp/remote_worker.js | cut -d' ' -f1)
-                echo "✅ 远程文件获取成功"
-                echo "📊 文件大小: $FILE_SIZE 字节"
-                echo "🔐 文件哈希: ${FILE_HASH:0:16}..."
-                echo "REMOTE_VERSION=$FILE_HASH" >> $GITHUB_ENV
-                break
-              else
-                echo "⚠️ 文件大小异常: $FILE_SIZE 字节"
+            echo "---"
+            echo "🔄 处理文件: $FILE_NAME"
+            echo "📁 保存为: $SAVE_AS"
+            echo "🌐 源地址: $FILE_URL"
+            echo "🔧 需要处理: $NEED_PROCESS"
+            
+            # 下载文件
+            for attempt in {1..3}; do
+              echo "⬇️ 下载尝试 $attempt/3..."
+              if curl -f -s -o "/tmp/${FILE_NAME}_raw.js" "$FILE_URL"; then
+                FILE_SIZE=$(stat -c%s "/tmp/${FILE_NAME}_raw.js" 2>/dev/null || stat -f%z "/tmp/${FILE_NAME}_raw.js" 2>/dev/null)
+                
+                if [[ $FILE_SIZE -gt 100 ]]; then
+                  FILE_HASH=$(sha256sum "/tmp/${FILE_NAME}_raw.js" | cut -d' ' -f1)
+                  echo "✅ 下载成功 | 大小: $FILE_SIZE 字节 | 哈希: ${FILE_HASH:0:16}..."
+                  
+                  # 检查是否需要更新
+                  if [[ -f "$SAVE_AS" ]]; then
+                    LOCAL_HASH=$(sha256sum "$SAVE_AS" 2>/dev/null | cut -d' ' -f1 || echo "missing")
+                    if [[ "$LOCAL_HASH" != "$FILE_HASH" ]]; then
+                      echo "🔄 文件有更新，需要下载"
+                      NEED_UPDATE="true"
+                    else
+                      echo "✅ 文件无变化，跳过"
+                      NEED_UPDATE="false"
+                    fi
+                  else
+                    echo "🔄 文件不存在，需要下载"
+                    NEED_UPDATE="true"
+                  fi
+                  
+                  # 保存文件信息
+                  DOWNLOAD_STATUS=$(echo "$DOWNLOAD_STATUS" | jq --arg name "$FILE_NAME" --arg hash "$FILE_HASH" --arg update "$NEED_UPDATE" --arg process "$NEED_PROCESS" --arg save_as "$SAVE_AS" '.[$name] = {"hash": $hash, "need_update": $update, "need_process": $process, "save_as": $save_as}')
+                  
+                  if [[ "$NEED_UPDATE" == "true" ]]; then
+                    UPDATE_NEEDED="true"
+                  fi
+                  break
+                else
+                  echo "⚠️ 文件大小异常: $FILE_SIZE 字节"
+                fi
               fi
-            fi
+              
+              if [[ $attempt -eq 3 ]]; then
+                echo "❌ 下载失败: $FILE_NAME"
+                DOWNLOAD_STATUS=$(echo "$DOWNLOAD_STATUS" | jq --arg name "$FILE_NAME" --arg status "failed" '.[$name] = {"status": $status}')
+                break
+              fi
+              
+              echo "⏳ 等待 3 秒后重试..."
+              sleep 3
+            done
+          done
+          
+          echo "📊 下载完成报告:"
+          echo "$DOWNLOAD_STATUS" | jq '.'
+          
+          echo "DOWNLOAD_STATUS='$DOWNLOAD_STATUS'" >> $GITHUB_ENV
+          echo "UPDATE_NEEDED='$UPDATE_NEEDED'" >> $GITHUB_ENV
+
+      # 第三阶段：文件处理
+      - name: 🔄 处理需要优化的文件
+        if: env.UPDATE_NEEDED == 'true'
+        run: |
+          echo "🛠️ 开始处理需要优化的文件..."
+          
+          # 读取下载状态
+          FILES_COUNT=$(jq length files_config.json)
+          
+          for i in $(seq 0 $(($FILES_COUNT - 1))); do
+            FILE_NAME=$(jq -r ".[$i].name" files_config.json)
+            SAVE_AS=$(jq -r ".[$i].save_as" files_config.json)
+            NEED_PROCESS=$(jq -r ".[$i].process" files_config.json)
+            NEED_UPDATE=$(echo "$DOWNLOAD_STATUS" | jq -r ".\"$FILE_NAME\".need_update")
             
-            if [[ $attempt -eq 3 ]]; then
-              echo "❌ 获取远程文件失败，请检查网络连接"
-              exit 1
+            if [[ "$NEED_UPDATE" == "true" && "$NEED_PROCESS" == "true" ]]; then
+              echo "---"
+              echo "🔧 处理文件: $FILE_NAME → $SAVE_AS"
+              
+              # 第一步：代码压缩
+              echo "📦 使用 terser 进行代码压缩..."
+              terser "/tmp/${FILE_NAME}_raw.js" \
+                --compress \
+                --mangle \
+                --output "/tmp/${FILE_NAME}_min.js"
+              
+              # 第二步：代码混淆
+              echo "🎭 使用 javascript-obfuscator 进行代码混淆..."
+              javascript-obfuscator "/tmp/${FILE_NAME}_min.js" \
+                --output "$SAVE_AS" \
+                --compact true \
+                --control-flow-flattening true \
+                --control-flow-flattening-threshold 0.75 \
+                --dead-code-injection true \
+                --dead-code-injection-threshold 0.4 \
+                --disable-console-output true \
+                --identifier-names-generator hexadecimal \
+                --string-array true \
+                --string-array-encoding rc4 \
+                --string-array-threshold 0.8 \
+                --string-array-rotate true \
+                --string-array-shuffle true \
+                --transform-object-keys true
+              
+              # 第三步：结果验证
+              if [[ -f "$SAVE_AS" ]]; then
+                FINAL_SIZE=$(stat -c%s "$SAVE_AS" 2>/dev/null || stat -f%z "$SAVE_AS" 2>/dev/null)
+                ORIGINAL_SIZE=$(stat -c%s "/tmp/${FILE_NAME}_raw.js" 2>/dev/null || stat -f%z "/tmp/${FILE_NAME}_raw.js" 2>/dev/null)
+                RATIO=$(( (FINAL_SIZE * 100) / ORIGINAL_SIZE ))
+                
+                echo "📈 优化完成:"
+                echo "   ├─ 原始大小: $ORIGINAL_SIZE 字节"
+                echo "   ├─ 处理后大小: $FINAL_SIZE 字节" 
+                echo "   ├─ 体积比例: $RATIO%"
+                echo "   └─ 节省空间: $((ORIGINAL_SIZE - FINAL_SIZE)) 字节"
+              else
+                echo "❌ 处理失败，使用原始文件"
+                cp "/tmp/${FILE_NAME}_raw.js" "$SAVE_AS"
+              fi
+              
+            elif [[ "$NEED_UPDATE" == "true" && "$NEED_PROCESS" == "false" ]]; then
+              echo "---"
+              echo "📋 直接保存文件: $FILE_NAME → $SAVE_AS"
+              cp "/tmp/${FILE_NAME}_raw.js" "$SAVE_AS"
+              FILE_SIZE=$(stat -c%s "$SAVE_AS" 2>/dev/null || stat -f%z "$SAVE_AS" 2>/dev/null)
+              echo "✅ 保存完成 | 大小: $FILE_SIZE 字节"
             fi
-            
-            echo "⏳ 等待 5 秒后重试..."
-            sleep 5
           done
 
-      # 第四阶段：更新决策
-      - name: 📊 版本比对分析
-        id: version_analysis
-        run: |
-          echo "📊 开始版本比对分析..."
-          
-          if [[ "$FORCE_UPDATE" == "true" ]]; then
-            echo "🔄 决策: 文件缺失 → 强制更新"
-            echo "UPDATE_NEEDED=true" >> $GITHUB_ENV
-          elif [[ -f "version.txt" ]]; then
-            LOCAL_VERSION=$(cat version.txt)
-            if [[ "$LOCAL_VERSION" == "$REMOTE_VERSION" ]]; then
-              echo "✅ 决策: 版本一致 → 无需更新"
-              echo "UPDATE_NEEDED=false" >> $GITHUB_ENV
-            else
-              echo "🔄 决策: 版本不同 → 需要更新"
-              echo "UPDATE_NEEDED=true" >> $GITHUB_ENV
-            fi
-          else
-            echo "🔄 决策: 首次运行 → 需要更新"
-            echo "UPDATE_NEEDED=true" >> $GITHUB_ENV
-          fi
-
-      # 第五阶段：文件处理
-      - name: 💾 保存原始文件
+      # 第四阶段：版本管理和提交
+      - name: 📝 生成版本信息和提交
         if: env.UPDATE_NEEDED == 'true'
         run: |
-          echo "💾 保存原始文件..."
-          cp /tmp/remote_worker.js source.js
-          echo "✅ source.js 保存完成"
-
-      - name: 🔄 代码压缩混淆
-        if: env.UPDATE_NEEDED == 'true'
-        run: |
-          echo "🛠️ 开始代码优化处理..."
+          echo "📝 生成版本信息..."
           
-          # 第一步：代码压缩
-          echo "📦 使用 terser 进行代码压缩..."
-          terser /tmp/remote_worker.js \
-            --compress \
-            --mangle \
-            --output /tmp/min_worker.js
+          # 创建版本信息文件
+          VERSION_INFO="{"
+          VERSION_INFO+="\"updated_at\": \"$(date -Iseconds)\","
+          VERSION_INFO+="\"files\": {"
           
-          # 第二步：代码混淆
-          echo "🎭 使用 javascript-obfuscator 进行代码混淆..."
-          javascript-obfuscator /tmp/min_worker.js \
-            --output _worker.js \
-            --compact true \
-            --control-flow-flattening true \
-            --control-flow-flattening-threshold 0.75 \
-            --dead-code-injection true \
-            --dead-code-injection-threshold 0.4 \
-            --disable-console-output true \
-            --identifier-names-generator hexadecimal \
-            --string-array true \
-            --string-array-encoding rc4 \
-            --string-array-threshold 0.8 \
-            --string-array-rotate true \
-            --string-array-shuffle true \
-            --transform-object-keys true
+          FIRST_FILE=true
+          FILES_COUNT=$(jq length files_config.json)
           
-          # 第三步：结果验证
-          if [[ -f "_worker.js" ]]; then
-            FINAL_SIZE=$(stat -c%s _worker.js 2>/dev/null || stat -f%z _worker.js 2>/dev/null)
-            ORIGINAL_SIZE=$(stat -c%s source.js 2>/dev/null || stat -f%z source.js 2>/dev/null)
-            RATIO=$(( (FINAL_SIZE * 100) / ORIGINAL_SIZE ))
+          for i in $(seq 0 $(($FILES_COUNT - 1))); do
+            FILE_NAME=$(jq -r ".[$i].name" files_config.json)
+            SAVE_AS=$(jq -r ".[$i].save_as" files_config.json)
+            FILE_HASH=$(echo "$DOWNLOAD_STATUS" | jq -r ".\"$FILE_NAME\".hash")
+            NEED_UPDATE=$(echo "$DOWNLOAD_STATUS" | jq -r ".\"$FILE_NAME\".need_update")
             
-            echo "📈 优化完成报告:"
-            echo "   ├─ 原始大小: $ORIGINAL_SIZE 字节"
-            echo "   ├─ 处理后大小: $FINAL_SIZE 字节" 
-            echo "   ├─ 体积比例: $RATIO%"
-            echo "   └─ 节省空间: $((ORIGINAL_SIZE - FINAL_SIZE)) 字节"
-            
-            if [[ $FINAL_SIZE -gt 1048576 ]]; then
-              echo "⚠️ 注意: 文件超过 1MB，可能影响 Cloudflare 部署"
+            if [[ "$NEED_UPDATE" == "true" ]]; then
+              if [[ "$FIRST_FILE" == "true" ]]; then
+                FIRST_FILE=false
+              else
+                VERSION_INFO+=","
+              fi
+              
+              VERSION_INFO+="\"$FILE_NAME\": \"${FILE_HASH:0:16}\""
             fi
-          else
-            echo "❌ 混淆失败，使用原始文件作为备用方案"
-            cp /tmp/remote_worker.js _worker.js
-          fi
+          done
+          
+          VERSION_INFO+="}}"
+          
+          echo "$VERSION_INFO" | jq '.' > version.json
+          echo "📄 版本信息:"
+          cat version.json
 
-      # 第六阶段：提交更改
-      - name: 📝 提交代码更新
+      - name: 📤 提交代码更新
         if: env.UPDATE_NEEDED == 'true'
         run: |
-          echo "📝 准备提交代码更新..."
+          echo "📤 准备提交代码更新..."
           
-          # 更新版本文件
-          echo "$REMOTE_VERSION" > version.txt
-          
-          # 添加文件到暂存区
-          git add source.js _worker.js version.txt
+          # 添加所有更新的文件到暂存区
+          git add .
           
           # 检查是否有实际更改
           if git diff --staged --quiet; then
@@ -193,30 +260,41 @@ jobs:
             exit 0
           fi
           
-          # 提交更改
-          git commit -m "🔄 Auto Update Worker
-
-          • 同步最新 Worker 文件（混淆版）
-          • 版本: ${REMOTE_VERSION:0:16}...
-          • 更新时间: $(date '+%Y-%m-%d %H:%M:%S')
-          • 优化处理: 压缩 + 混淆"
+          # 生成提交信息
+          COMMIT_MSG="🔄 Auto Update Multiple Files\n\n"
+          COMMIT_MSG+="• 更新时间: $(date '+%Y-%m-%d %H:%M:%S')\n"
+          COMMIT_MSG+="• 更新文件:\n"
           
-          # 推送更改
+          FILES_COUNT=$(jq length files_config.json)
+          for i in $(seq 0 $(($FILES_COUNT - 1))); do
+            FILE_NAME=$(jq -r ".[$i].name" files_config.json)
+            SAVE_AS=$(jq -r ".[$i].save_as" files_config.json)
+            NEED_UPDATE=$(echo "$DOWNLOAD_STATUS" | jq -r ".\"$FILE_NAME\".need_update")
+            
+            if [[ "$NEED_UPDATE" == "true" ]]; then
+              COMMIT_MSG+="  - $SAVE_AS\n"
+            fi
+          done
+          
+          COMMIT_MSG+="• 详细信息请查看 version.json"
+          
+          # 提交更改
+          echo -e "$COMMIT_MSG" | git commit -F -
           git push
           echo "✅ 代码更新提交完成"
 
-      # 第七阶段：结果通知
+      # 第五阶段：结果通知
       - name: 🎉 更新成功通知
         if: env.UPDATE_NEEDED == 'true'
         run: |
-          echo "🎉 自动更新任务完成！"
-          echo "::notice title=🔄 更新完成::已成功同步、压缩并混淆代码，版本: ${REMOTE_VERSION:0:16}..."
+          echo "🎉 多文件自动更新任务完成！"
+          echo "::notice title=🔄 更新完成::已成功更新多个文件，详细信息请查看提交记录"
 
       - name: 💤 无需更新通知
         if: env.UPDATE_NEEDED == 'false'
         run: |
-          echo "💤 当前已是最新版本，无需更新"
-          echo "::notice title=💤 无需更新::当前 Worker 文件已是最新版本"
+          echo "💤 所有文件均为最新版本，无需更新"
+          echo "::notice title=💤 无需更新::所有文件已是最新版本"
 
   # 清理阶段
   cleanup:
