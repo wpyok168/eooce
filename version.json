@@ -1,8 +1,8 @@
 {
-  "updated_at": "2025-11-19T14:48:00+00:00",
+  "updated_at": "2025-11-21T02:40:59+00:00",
   "files": {
     "worker_source": "985ca64f022b7a2d",
-    "shadowsocks": "a7c29de984d6191d", 
+    "shadowsocks": "fbddb67f10149cec", 
     "snippets": "e5dcf2e74fe44539"
   }
 }
